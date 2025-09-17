@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 
 const MobileKlondikeSolitaire = () => {
   // Card suits and ranks
@@ -48,7 +48,7 @@ const MobileKlondikeSolitaire = () => {
       }
     }
     
-    const stock = deck.slice(deckIndex).map(card => ({ ...card, faceUp: false }));
+    const stock = deck.slice(deckIndex);
     
     return {
       stock,
@@ -56,58 +56,96 @@ const MobileKlondikeSolitaire = () => {
       foundations,
       tableau,
       selected: null,
-      moveHistory: [],
       moves: 0,
       gameWon: false
     };
   };
 
   const [gameState, setGameState] = useState(initializeGame);
+  const [moveHistory, setMoveHistory] = useState([]);
   const [lastTap, setLastTap] = useState({ time: 0, target: null });
 
+  // Card component - removing memo to simplify and avoid type issues
+  const Card = ({ card, onClick, selected = false }) => {
+    const isRed = ['hearts', 'diamonds'].includes(card.suit);
+    const displayRank = rankLabels[card.rank] || card.rank;
+    
+    if (!card.faceUp) {
+      return (
+        <div 
+          className="card card-back"
+          onClick={onClick}
+        >
+          <div className="card-pattern"></div>
+        </div>
+      );
+    }
+
+    return (
+      <div 
+        className={`card card-face ${isRed ? 'red' : 'black'} ${selected ? 'selected' : ''}`}
+        onClick={onClick}
+      >
+        <div className="card-corner top-left">
+          <div className="rank">{displayRank}</div>
+          <div className="suit">{suitSymbols[card.suit]}</div>
+        </div>
+        <div className="card-center">
+          <div className="suit-large">{suitSymbols[card.suit]}</div>
+        </div>
+        <div className="card-corner bottom-right">
+          <div className="rank">{displayRank}</div>
+          <div className="suit">{suitSymbols[card.suit]}</div>
+        </div>
+      </div>
+    );
+  };
+
   // Check if card can be moved to foundation
-  const canMoveToFoundation = (card, foundation) => {
+  const canMoveToFoundation = useCallback((card, foundation) => {
     if (foundation.length === 0) {
-      return card.rank === 1; // Only Ace can start foundation
+      return card.rank === 1;
     }
     const topCard = foundation[foundation.length - 1];
     return card.suit === topCard.suit && card.rank === topCard.rank + 1;
-  };
+  }, []);
 
   // Check if card can be moved to tableau
-  const canMoveToTableau = (card, tableau) => {
+  const canMoveToTableau = useCallback((card, tableau) => {
     if (tableau.length === 0) {
-      return card.rank === 13; // Only King can go to empty tableau
+      return card.rank === 13;
     }
     const topCard = tableau[tableau.length - 1];
     const redSuits = ['hearts', 'diamonds'];
     const isCardRed = redSuits.includes(card.suit);
     const isTopRed = redSuits.includes(topCard.suit);
     return card.rank === topCard.rank - 1 && isCardRed !== isTopRed;
-  };
-
-  // Get moveable cards from tableau pile
-  const getMoveableCards = (tableauPile, startIndex) => {
-    const cards = [];
-    for (let i = startIndex; i < tableauPile.length; i++) {
-      if (!tableauPile[i].faceUp) break;
-      cards.push(tableauPile[i]);
-    }
-    return cards;
-  };
+  }, []);
 
   // Auto-move card to foundation if possible
-  const autoMoveToFoundation = (card) => {
+  const autoMoveToFoundation = useCallback((card, foundations) => {
     for (let i = 0; i < 4; i++) {
-      if (canMoveToFoundation(card, gameState.foundations[i])) {
+      if (canMoveToFoundation(card, foundations[i])) {
         return i;
       }
     }
     return -1;
-  };
+  }, [canMoveToFoundation]);
+
+  // Helper function to create deep copy of game state
+  const deepCopyGameState = useCallback((state) => {
+    return {
+      ...state,
+      stock: [...state.stock],
+      waste: [...state.waste],
+      foundations: state.foundations.map(foundation => [...foundation]),
+      tableau: state.tableau.map(column => [...column]),
+      selected: state.selected ? { ...state.selected, location: { ...state.selected.location } } : null
+    };
+  }, []);
 
   // Handle card selection and movement
-  const handleCardTap = (location, pileIndex = 0, cardIndex = 0) => {
+  const handleCardTap = useCallback((location, pileIndex = 0, cardIndex = 0) => {
     const now = Date.now();
     const timeDiff = now - lastTap.time;
     const isSameTarget = lastTap.target === `${location}-${pileIndex}-${cardIndex}`;
@@ -116,21 +154,24 @@ const MobileKlondikeSolitaire = () => {
     setLastTap({ time: now, target: `${location}-${pileIndex}-${cardIndex}` });
 
     setGameState(prev => {
-      const newState = { ...prev };
-      
+      // Save current state to history before making changes
+      setMoveHistory(prevHistory => {
+        const newHistory = [...prevHistory, deepCopyGameState(prev)];
+        return newHistory.slice(-10); // Keep only last 10 moves
+      });
+
       if (location === 'stock') {
-        // Draw from stock to waste
+        const newState = deepCopyGameState(prev);
+        
         if (newState.stock.length > 0) {
-          const card = { ...newState.stock.pop(), faceUp: true };
-          newState.waste = [...newState.waste, card];
+          const card = newState.stock.pop();
+          card.faceUp = true;
+          newState.waste.push(card);
           newState.moves++;
-          newState.moveHistory.push(JSON.parse(JSON.stringify(prev)));
         } else if (newState.waste.length > 0) {
-          // Reset waste to stock
           newState.stock = newState.waste.map(card => ({ ...card, faceUp: false })).reverse();
           newState.waste = [];
           newState.moves++;
-          newState.moveHistory.push(JSON.parse(JSON.stringify(prev)));
         }
         newState.selected = null;
         return newState;
@@ -140,31 +181,32 @@ const MobileKlondikeSolitaire = () => {
       let selectedLocation = null;
 
       // Get the selected card
-      if (location === 'waste' && newState.waste.length > 0) {
-        selectedCard = newState.waste[newState.waste.length - 1];
+      if (location === 'waste' && prev.waste.length > 0) {
+        selectedCard = prev.waste[prev.waste.length - 1];
         selectedLocation = { type: 'waste' };
-      } else if (location === 'tableau' && newState.tableau[pileIndex].length > cardIndex) {
-        const card = newState.tableau[pileIndex][cardIndex];
+      } else if (location === 'tableau' && prev.tableau[pileIndex].length > cardIndex) {
+        const card = prev.tableau[pileIndex][cardIndex];
         if (card.faceUp) {
           selectedCard = card;
           selectedLocation = { type: 'tableau', pile: pileIndex, index: cardIndex };
         }
-      } else if (location === 'foundation' && newState.foundations[pileIndex].length > 0) {
-        selectedCard = newState.foundations[pileIndex][newState.foundations[pileIndex].length - 1];
+      } else if (location === 'foundation' && prev.foundations[pileIndex].length > 0) {
+        selectedCard = prev.foundations[pileIndex][prev.foundations[pileIndex].length - 1];
         selectedLocation = { type: 'foundation', pile: pileIndex };
       }
 
       // Handle double-tap auto-move
       if (isDoubleTap && selectedCard) {
-        const foundationIndex = autoMoveToFoundation(selectedCard);
+        const foundationIndex = autoMoveToFoundation(selectedCard, prev.foundations);
         if (foundationIndex !== -1) {
-          newState.moveHistory.push(JSON.parse(JSON.stringify(prev)));
+          const newState = deepCopyGameState(prev);
           
           // Remove card from source
           if (selectedLocation.type === 'waste') {
             newState.waste.pop();
           } else if (selectedLocation.type === 'tableau') {
             newState.tableau[selectedLocation.pile].pop();
+            
             // Flip next card if needed
             const pile = newState.tableau[selectedLocation.pile];
             if (pile.length > 0 && !pile[pile.length - 1].faceUp) {
@@ -183,28 +225,28 @@ const MobileKlondikeSolitaire = () => {
       }
 
       // Handle selection/movement
-      if (!newState.selected && selectedCard) {
-        // Select card
-        newState.selected = {
-          card: selectedCard,
-          location: selectedLocation
+      if (!prev.selected && selectedCard) {
+        return {
+          ...prev,
+          selected: { card: selectedCard, location: selectedLocation }
         };
-      } else if (newState.selected) {
-        // Try to move selected card
-        const { card: movingCard, location: sourceLocation } = newState.selected;
-        let validMove = false;
-
+      } else if (prev.selected) {
+        const { card: movingCard, location: sourceLocation } = prev.selected;
+        
         if (location === 'foundation') {
           // Move to foundation
-          if (canMoveToFoundation(movingCard, newState.foundations[pileIndex])) {
-            validMove = true;
-            newState.moveHistory.push(JSON.parse(JSON.stringify(prev)));
+          if (canMoveToFoundation(movingCard, prev.foundations[pileIndex])) {
+            const newState = deepCopyGameState(prev);
+            
+            // Add to foundation
+            newState.foundations[pileIndex].push(movingCard);
             
             // Remove from source
             if (sourceLocation.type === 'waste') {
               newState.waste.pop();
             } else if (sourceLocation.type === 'tableau') {
               newState.tableau[sourceLocation.pile].pop();
+              
               // Flip next card if needed
               const pile = newState.tableau[sourceLocation.pile];
               if (pile.length > 0 && !pile[pile.length - 1].faceUp) {
@@ -212,14 +254,21 @@ const MobileKlondikeSolitaire = () => {
               }
             }
             
-            newState.foundations[pileIndex].push(movingCard);
             newState.moves++;
+            newState.selected = null;
+            
+            // Check for win condition
+            const totalFoundationCards = newState.foundations.reduce((sum, pile) => sum + pile.length, 0);
+            if (totalFoundationCards === 52) {
+              newState.gameWon = true;
+            }
+            
+            return newState;
           }
         } else if (location === 'tableau') {
           // Move to tableau
-          if (canMoveToTableau(movingCard, newState.tableau[pileIndex])) {
-            validMove = true;
-            newState.moveHistory.push(JSON.parse(JSON.stringify(prev)));
+          if (canMoveToTableau(movingCard, prev.tableau[pileIndex])) {
+            const newState = deepCopyGameState(prev);
             
             if (sourceLocation.type === 'waste') {
               // Move single card from waste
@@ -227,14 +276,10 @@ const MobileKlondikeSolitaire = () => {
               newState.tableau[pileIndex].push(movingCard);
             } else if (sourceLocation.type === 'tableau') {
               // Move cards from tableau to tableau
-              const sourceCards = getMoveableCards(
-                newState.tableau[sourceLocation.pile], 
-                sourceLocation.index
-              );
+              const sourceCards = newState.tableau[sourceLocation.pile].slice(sourceLocation.index);
               
               // Remove cards from source
-              newState.tableau[sourceLocation.pile] = 
-                newState.tableau[sourceLocation.pile].slice(0, sourceLocation.index);
+              newState.tableau[sourceLocation.pile] = newState.tableau[sourceLocation.pile].slice(0, sourceLocation.index);
               
               // Flip next card if needed
               const sourcePile = newState.tableau[sourceLocation.pile];
@@ -245,86 +290,86 @@ const MobileKlondikeSolitaire = () => {
               // Add cards to destination
               newState.tableau[pileIndex].push(...sourceCards);
             } else if (sourceLocation.type === 'foundation') {
-              // Move from foundation to tableau
               newState.foundations[sourceLocation.pile].pop();
               newState.tableau[pileIndex].push(movingCard);
             }
             
             newState.moves++;
+            newState.selected = null;
+            return newState;
           }
         }
 
-        newState.selected = null;
+        // If no valid move, just deselect
+        return { ...prev, selected: null };
       }
 
-      // Check for win condition
-      const totalFoundationCards = newState.foundations.reduce((sum, pile) => sum + pile.length, 0);
-      if (totalFoundationCards === 52) {
-        newState.gameWon = true;
-      }
-
-      return newState;
+      return prev;
     });
-  };
+  }, [lastTap, canMoveToFoundation, canMoveToTableau, autoMoveToFoundation, deepCopyGameState]);
 
   // Handle empty tableau tap
-  const handleEmptyTableauTap = (pileIndex) => {
+  const handleEmptyTableauTap = useCallback((pileIndex) => {
     if (gameState.selected && gameState.selected.card.rank === 13) {
       handleCardTap('tableau', pileIndex, 0);
     }
-  };
+  }, [gameState.selected, handleCardTap]);
 
   // Undo last move
-  const undoMove = () => {
-    if (gameState.moveHistory.length > 0) {
-      const previousState = gameState.moveHistory[gameState.moveHistory.length - 1];
-      setGameState({
-        ...previousState,
-        moveHistory: gameState.moveHistory.slice(0, -1)
-      });
+  const undoMove = useCallback(() => {
+    if (moveHistory.length > 0) {
+      const previousState = moveHistory[moveHistory.length - 1];
+      setGameState(previousState);
+      setMoveHistory(prev => prev.slice(0, -1));
     }
-  };
+  }, [moveHistory]);
 
   // New game
-  const newGame = () => {
+  const newGame = useCallback(() => {
     setGameState(initializeGame());
-  };
+    setMoveHistory([]);
+  }, []);
 
-  // Card component
-  const Card = ({ card, onClick, selected = false, className = '' }) => {
-    const isRed = ['hearts', 'diamonds'].includes(card.suit);
-    const displayRank = rankLabels[card.rank] || card.rank;
-    
-    if (!card.faceUp) {
-      return (
-        <div 
-          className={`card card-back ${className}`}
-          onClick={onClick}
-        >
-          <div className="card-pattern"></div>
-        </div>
-      );
-    }
-
-    return (
-      <div 
-        className={`card card-face ${isRed ? 'red' : 'black'} ${selected ? 'selected' : ''} ${className}`}
-        onClick={onClick}
-      >
-        <div className="card-corner top-left">
-          <div className="rank">{displayRank}</div>
-          <div className="suit">{suitSymbols[card.suit]}</div>
-        </div>
-        <div className="card-center">
-          <div className="suit-large">{suitSymbols[card.suit]}</div>
-        </div>
-        <div className="card-corner bottom-right">
-          <div className="rank">{displayRank}</div>
-          <div className="suit">{suitSymbols[card.suit]}</div>
-        </div>
+  // Memoized tableau rendering to prevent unnecessary re-renders
+  const tableauPiles = useMemo(() => {
+    return gameState.tableau.map((pile, pileIndex) => (
+      <div key={pileIndex} className="tableau-pile">
+        {pile.length > 0 ? (
+          <div className="tableau-cards">
+            {pile.map((card, cardIndex) => (
+              <div
+                key={card.id}
+                className="tableau-card-wrapper"
+                style={{
+                  position: 'absolute',
+                  top: `${cardIndex * 3}vw`,
+                  left: 0,
+                  zIndex: cardIndex,
+                  width: '12vw',
+                  '--card-index': cardIndex
+                } as React.CSSProperties}
+              >
+                <Card 
+                  card={card}
+                  onClick={() => handleCardTap('tableau', pileIndex, cardIndex)}
+                  selected={gameState.selected?.location?.type === 'tableau' && 
+                           gameState.selected?.location?.pile === pileIndex &&
+                           gameState.selected?.location?.index === cardIndex}
+                />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div 
+            className="pile-placeholder"
+            onClick={() => handleEmptyTableauTap(pileIndex)}
+          >
+            K
+          </div>
+        )}
       </div>
-    );
-  };
+    ));
+  }, [gameState.tableau, gameState.selected, handleCardTap, handleEmptyTableauTap]);
 
   return (
     <div className="solitaire-game">
@@ -475,14 +520,6 @@ const MobileKlondikeSolitaire = () => {
           width: 12vw;
         }
 
-        .tableau-card-wrapper {
-          position: absolute;
-          top: calc(var(--card-index) * 3vw);
-          left: 0;
-          z-index: var(--card-index);
-          width: 12vw;
-        }
-
         .card {
           width: 12vw;
           height: 16vw;
@@ -508,7 +545,7 @@ const MobileKlondikeSolitaire = () => {
         .card.selected {
           border: 3px solid #ffd700;
           box-shadow: 0 0 15px rgba(255, 215, 0, 0.6);
-          z-index: 10;
+          z-index: 100;
         }
 
         .card-back {
@@ -639,8 +676,8 @@ const MobileKlondikeSolitaire = () => {
           }
           
           .tableau-card-wrapper {
-            top: calc(var(--card-index) * 20px);
-            width: 80px;
+            top: calc(var(--card-index) * 20px) !important;
+            width: 80px !important;
           }
           
           .card {
@@ -690,7 +727,7 @@ const MobileKlondikeSolitaire = () => {
           <button 
             className="control-btn"
             onClick={undoMove}
-            disabled={gameState.moveHistory.length === 0}
+            disabled={moveHistory.length === 0}
           >
             Undo
           </button>
@@ -755,38 +792,7 @@ const MobileKlondikeSolitaire = () => {
         </div>
 
         <div className="tableau">
-          {gameState.tableau.map((pile, pileIndex) => (
-            <div key={pileIndex} className="tableau-pile">
-              {pile.length > 0 ? (
-                <div className="tableau-cards">
-                  {pile.map((card, cardIndex) => (
-                    <div
-                      key={card.id}
-                      className="tableau-card-wrapper"
-                      style={{
-                        '--card-index': cardIndex
-                      } as React.CSSProperties}
-                    >
-                      <Card 
-                        card={card}
-                        onClick={() => handleCardTap('tableau', pileIndex, cardIndex)}
-                        selected={gameState.selected?.location?.type === 'tableau' && 
-                                 gameState.selected?.location?.pile === pileIndex &&
-                                 gameState.selected?.location?.index === cardIndex}
-                      />
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div 
-                  className="pile-placeholder"
-                  onClick={() => handleEmptyTableauTap(pileIndex)}
-                >
-                  K
-                </div>
-              )}
-            </div>
-          ))}
+          {tableauPiles}
         </div>
       </div>
 
